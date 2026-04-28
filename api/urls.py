@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, ServiceViewSet, ProductViewSet, 
-    AppointmentViewSet, PaymentViewSet, ExpenseViewSet
+    AppointmentViewSet, PaymentViewSet, ExpenseViewSet,
+    DashboardView, WorkingHourViewSet, TimeBlockViewSet, ProductSaleViewSet
 )
 
 router = DefaultRouter()
@@ -12,7 +13,11 @@ router.register(r'products', ProductViewSet)
 router.register(r'appointments', AppointmentViewSet)
 router.register(r'payments', PaymentViewSet)
 router.register(r'expenses', ExpenseViewSet)
+router.register(r'working-hours', WorkingHourViewSet)
+router.register(r'time-blocks', TimeBlockViewSet)
+router.register(r'product-sales', ProductSaleViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('dashboard-summary/', DashboardView.as_view(), name='dashboard-summary'),
 ]

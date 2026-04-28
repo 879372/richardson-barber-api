@@ -74,9 +74,10 @@ DATABASES = {
     }
 }
 
-db_url = os.getenv('DATABASE_URL')
-if db_url:
-    DATABASES['default'] = dj_database_url.parse(db_url)
+# Commented out for local testing without Postgres
+# db_url = os.getenv('DATABASE_URL')
+# if db_url:
+#     DATABASES['default'] = dj_database_url.parse(db_url)
 
 AUTH_PASSWORD_VALIDATORS = [
     {
