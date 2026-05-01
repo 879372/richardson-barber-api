@@ -1,10 +1,10 @@
 from rest_framework import serializers
-from .models import User, Service, Product, Appointment, Payment, Expense, Goal, WorkingHour, TimeBlock, Notification
+from .models import User, Service, Product, Appointment, Payment, Expense, Goal, WorkingHour, TimeBlock, Notification, ProductSale
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'username', 'first_name', 'last_name', 'email', 'role', 'phone', 'birth_date', 'internal_notes')
+        fields = ('id', 'username', 'first_name', 'last_name', 'email', 'role', 'phone', 'birth_date', 'internal_notes', 'password')
         extra_kwargs = {'password': {'write_only': True}}
 
     def create(self, validated_data):
@@ -58,4 +58,9 @@ class TimeBlockSerializer(serializers.ModelSerializer):
 class ProductSaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductSale
+        fields = '__all__'
+
+class GoalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Goal
         fields = '__all__'

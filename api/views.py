@@ -3,11 +3,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
-from django.db.models import Sum
+from django.db.models import Sum, Count
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import datetime, timedelta
 from .models import User, Service, Product, Appointment, Payment, Expense, Goal, WorkingHour, TimeBlock, Notification, ProductSale
-    WorkingHourSerializer, TimeBlockSerializer, ProductSaleSerializer
+from .serializers import (
+    UserSerializer, ServiceSerializer, ProductSerializer, 
+    AppointmentSerializer, PaymentSerializer, ExpenseSerializer,
+    WorkingHourSerializer, TimeBlockSerializer, ProductSaleSerializer, GoalSerializer
 )
 
 import csv
@@ -16,15 +19,64 @@ from django.http import HttpResponse
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['role']
     def get_permissions(self):
-        if self.action in ['me', 'available_times']:
+        if self.action == 'me':
             return [permissions.IsAuthenticated()]
-        # Allow any for barber list and available_times in portal
         if self.action == 'available_times':
             return [permissions.AllowAny()]
         if self.action == 'list' and self.request.query_params.get('role') == 'barber':
             return [permissions.AllowAny()]
+        if self.action in ['create']:
+            return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
+    def check_phone(self, request):
+        phone = request.query_params.get('phone')
+        if not phone:
+            return Response({'error': 'Phone is required'}, status=400)
+        
+        # Normalize phone (remove non-digits)
+        import re
+        clean_phone = re.sub(r'\D', '', phone)
+        
+        user = User.objects.filter(phone=clean_phone, role='client').first()
+        if user:
+            return Response({
+                'exists': True,
+                'user': UserSerializer(user).data
+            })
+        return Response({'exists': False})
+
+    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
+    def register_client(self, request):
+        name = request.data.get('name')
+        phone = request.data.get('phone')
+        birth_date = request.data.get('birth_date')
+        
+        import re
+        clean_phone = re.sub(r'\D', '', phone) if phone else ''
+        
+        if not clean_phone:
+            return Response({'error': 'Telefone é obrigatório'}, status=400)
+            
+        client = User.objects.filter(phone=clean_phone, role='client').first()
+        if not client:
+            client = User.objects.create(
+                phone=clean_phone,
+                username=f"user_{clean_phone}",
+                first_name=name,
+                birth_date=birth_date,
+                role='client'
+            )
+        else:
+            if name: client.first_name = name
+            if birth_date: client.birth_date = birth_date
+            client.save()
+            
+        return Response(UserSerializer(client).data)
 
     @action(detail=False, methods=['get'])
     def me(self, request):
@@ -35,6 +87,7 @@ class UserViewSet(viewsets.ModelViewSet):
     def available_times(self, request, pk=None):
         barber = self.get_object()
         date_str = request.query_params.get('date') # YYYY-MM-DD
+        service_id = request.query_params.get('service_id')
         if not date_str:
             return Response({'error': 'Parâmetro "date" é obrigatório.'}, status=400)
             
@@ -43,51 +96,105 @@ class UserViewSet(viewsets.ModelViewSet):
         except ValueError:
             return Response({'error': 'Formato de data inválido. Use YYYY-MM-DD.'}, status=400)
 
+        requested_duration = 30
+        if service_id:
+            try:
+                service = Service.objects.get(id=service_id)
+                requested_duration = service.duration_minutes
+            except Service.DoesNotExist:
+                pass
+
         day_of_week = date.weekday()
         
         # 1. Get working hours for the day
         working_hour = WorkingHour.objects.filter(barber=barber, day_of_week=day_of_week, is_active=True).first()
         if not working_hour:
-            return Response([]) # Not working this day
+            return Response([])
             
-        # 2. Generate slots (every 30 mins)
-        slots = []
-        curr_time = datetime.combine(date, working_hour.start_time)
-        end_time = datetime.combine(date, working_hour.end_time)
+        # Use naive datetimes for internal day comparisons to avoid TZ issues
+        start_dt = datetime.combine(date, working_hour.start_time)
+        end_dt = datetime.combine(date, working_hour.end_time)
         
-        while curr_time < end_time:
-            slots.append(curr_time)
-            curr_time += timedelta(minutes=30)
-            
-        # 3. Filter out existing appointments
+        break_start = None
+        break_end = None
+        if working_hour.break_start_time and working_hour.break_end_time:
+            break_start = datetime.combine(date, working_hour.break_start_time)
+            break_end = datetime.combine(date, working_hour.break_end_time)
+        
+        # 2. Get appointments and blocks
         appointments = Appointment.objects.filter(
             barber=barber, 
             date_time__date=date
         ).exclude(status='cancelled')
         
-        # 4. Filter out time blocks
         blocks = TimeBlock.objects.filter(
             barber=barber,
             start_time__date=date
         )
         
+        # 3. Generate slots
         available_slots = []
-        for slot in slots:
+        now = timezone.now() # now is aware
+        
+        # If today, we need an aware reference for the past check
+        today = timezone.localtime(now).date()
+        
+        # Determine search step: 30 mins default, or service duration if > 30
+        step_minutes = 30
+        if requested_duration > 30:
+            step_minutes = requested_duration
+
+        curr_dt = start_dt
+        while curr_dt + timedelta(minutes=requested_duration) <= end_dt:
+            # Check if in the past
+            curr_aware = timezone.make_aware(curr_dt)
+            if curr_aware < now:
+                curr_dt += timedelta(minutes=step_minutes)
+                continue
+                
+            req_start = curr_dt
+            req_end = curr_dt + timedelta(minutes=requested_duration)
             is_busy = False
-            for app in appointments:
-                app_start = app.date_time
-                duration = app.service.duration_minutes if app.service else 30
-                app_end = app_start + timedelta(minutes=duration)
-                if slot >= app_start and slot < app_end:
+
+            # Check lunch break
+            if break_start and break_end:
+                if req_start < break_end and req_end > break_start:
                     is_busy = True
-                    break
-            if is_busy: continue
-            for block in blocks:
-                if slot >= block.start_time and slot < block.end_time:
-                    is_busy = True
-                    break
+                    if curr_dt < break_end:
+                        curr_dt = break_end
+                        continue
+            
+            # Check appointments
             if not is_busy:
-                available_slots.append(slot.strftime('%H:%M'))
+                for app in appointments:
+                    # Convert app.date_time to naive for comparison
+                    app_start = timezone.localtime(app.date_time).replace(tzinfo=None)
+                    app_duration = app.service.duration_minutes if app.service else 30
+                    app_end = app_start + timedelta(minutes=app_duration)
+                    if req_start < app_end and req_end > app_start:
+                        is_busy = True
+                        curr_dt = app_end
+                        break
+            
+            # Check manual blocks
+            if not is_busy:
+                for block in blocks:
+                    b_start = timezone.localtime(block.start_time).replace(tzinfo=None)
+                    b_end = timezone.localtime(block.end_time).replace(tzinfo=None)
+                    if req_start < b_end and req_end > b_start:
+                        is_busy = True
+                        curr_dt = b_end
+                        break
+            
+            if not is_busy:
+                available_slots.append(curr_dt.strftime('%H:%M'))
+                curr_dt += timedelta(minutes=step_minutes)
+            elif is_busy and not (break_start and curr_dt < break_end):
+                # If busy but not by break (already handled by continue), move to next possible slot
+                # We use 5 min increment if it was an appointment/block to find the next possible start
+                # but the user wants "duration" steps for 40/60?
+                # Let's stick to step_minutes for consistency with user request
+                curr_dt += timedelta(minutes=step_minutes)
                 
         return Response(available_slots)
 
@@ -135,8 +242,28 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['status', 'barber', 'client', 'date_time']
+    filterset_fields = {
+        'status': ['exact'],
+        'barber': ['exact'],
+        'client': ['exact'],
+        'date_time': ['exact', 'date', 'gte', 'lte'],
+    }
     ordering_fields = ['date_time']
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
+    def public_list(self, request):
+        phone = request.query_params.get('phone')
+        if not phone:
+            return Response({'error': 'Telefone é obrigatório'}, status=400)
+        
+        import re
+        clean_phone = re.sub(r'\D', '', phone)
+        
+        appointments = Appointment.objects.filter(
+            client__phone=clean_phone
+        ).order_by('-date_time')
+        
+        return Response(AppointmentSerializer(appointments, many=True).data)
 
     @action(detail=False, methods=['get'])
     def export_csv(self, request):
@@ -169,20 +296,38 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def public_booking(self, request):
         name = request.data.get('name')
         phone = request.data.get('phone')
+        birth_date = request.data.get('birth_date')
+        
+        import re
+        clean_phone = re.sub(r'\D', '', phone) if phone else ''
+        
         service_id = request.data.get('service_id')
         barber_id = request.data.get('barber_id')
-        date_time = request.data.get('date_time')
+        from django.utils.dateparse import parse_datetime
+        date_time_str = request.data.get('date_time')
+        date_time = parse_datetime(date_time_str) if date_time_str else None
         
-        # 1. Find or create client
-        # In a real app, you'd use email or phone as unique ID. Let's use phone.
-        client, created = User.objects.get_or_create(
-            phone=phone,
-            defaults={
-                'username': f"user_{phone}",
-                'first_name': name,
-                'role': 'client'
-            }
-        )
+        # 1. Find or create client (identifying ONLY by phone)
+        client = User.objects.filter(phone=clean_phone, role='client').first()
+        created = False
+        
+        if not client:
+            # Create new client if not found
+            client = User.objects.create(
+                phone=clean_phone,
+                username=f"user_{clean_phone}",
+                first_name=name,
+                birth_date=birth_date,
+                role='client'
+            )
+            created = True
+        
+        if not created and (name or birth_date):
+            if name: client.first_name = name
+            if birth_date: client.birth_date = birth_date
+            client.save()
+        
+        notes = request.data.get('notes')
         
         # 2. Create appointment
         service = Service.objects.get(id=service_id)
@@ -194,7 +339,8 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             service=service,
             date_time=date_time,
             total_price=service.price,
-            status='pending'
+            status='confirmed',
+            notes=notes
         )
         
         serializer = self.get_serializer(appointment)
@@ -247,7 +393,8 @@ class DashboardView(APIView):
         today = timezone.now().date()
         
         # 1. Total appointments today
-        total_appointments = Appointment.objects.filter(date_time__date=today).count()
+        total_appointments = Appointment.objects.filter(date_time__date=today).exclude(status='cancelled').count()
+        completed_appointments = Appointment.objects.filter(date_time__date=today, status='completed').count()
         
         # 2. Predicted revenue today (all confirmed/pending appointments)
         predicted_revenue = Appointment.objects.filter(
@@ -266,6 +413,7 @@ class DashboardView(APIView):
         
         return Response({
             'total_appointments': total_appointments,
+            'completed_appointments': completed_appointments,
             'predicted_revenue': float(predicted_revenue),
             'completed_revenue': float(completed_revenue),
             'daily_goal': float(daily_goal),
@@ -289,4 +437,45 @@ class TimeBlockViewSet(viewsets.ModelViewSet):
 class ProductSaleViewSet(viewsets.ModelViewSet):
     queryset = ProductSale.objects.all()
     serializer_class = ProductSaleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class GoalViewSet(viewsets.ModelViewSet):
+    queryset = Goal.objects.all()
+    serializer_class = GoalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class FinancialSummaryView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        month = request.query_params.get('month', timezone.now().month)
+        year = request.query_params.get('year', timezone.now().year)
+        
+        try:
+            start_date = timezone.make_aware(datetime(int(year), int(month), 1))
+            if int(month) == 12:
+                end_date = timezone.make_aware(datetime(int(year) + 1, 1, 1))
+            else:
+                end_date = timezone.make_aware(datetime(int(year), int(month) + 1, 1))
+        except ValueError:
+            return Response({'error': 'Mês ou ano inválido'}, status=400)
+
+        expenses = Expense.objects.filter(date__range=[start_date.date(), end_date.date()])
+        total_expenses = expenses.aggregate(Sum('amount'))['amount__sum'] or 0
+        
+        payments = Payment.objects.filter(created_at__range=[start_date, end_date])
+        total_revenue = payments.aggregate(Sum('amount'))['amount__sum'] or 0
+        
+        method_summary = payments.values('method').annotate(
+            total_amount=Sum('amount'),
+            count=Count('id')
+        ).order_by('-total_amount')
+
+        return Response({
+            'total_revenue': float(total_revenue),
+            'total_expenses': float(total_expenses),
+            'net_profit': float(total_revenue - total_expenses),
+            'method_summary': list(method_summary),
+            'expenses': ExpenseSerializer(expenses, many=True).data
+        })
     permission_classes = [permissions.IsAuthenticated]

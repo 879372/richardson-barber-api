@@ -37,12 +37,16 @@ class WhatsAppService:
 
     @classmethod
     def send_confirmation(cls, appointment):
-        msg = f"Olá {appointment.client.first_name if appointment.client else 'Cliente'}, seu agendamento para {appointment.service.name} em {appointment.date_time.strftime('%d/%m às %H:%M')} foi confirmado! 💈"
+        from django.utils import timezone
+        local_dt = timezone.localtime(appointment.date_time)
+        msg = f"Olá {appointment.client.first_name if appointment.client else 'Cliente'}, seu agendamento para {appointment.service.name} em {local_dt.strftime('%d/%m às %H:%M')} foi confirmado! 💈"
         return cls.send_message(appointment, 'confirmation', msg)
 
     @classmethod
     def send_cancellation(cls, appointment):
-        msg = f"Olá, seu agendamento para {appointment.service.name} em {appointment.date_time.strftime('%d/%m às %H:%M')} foi cancelado. 😔"
+        from django.utils import timezone
+        local_dt = timezone.localtime(appointment.date_time)
+        msg = f"Olá, seu agendamento para {appointment.service.name} em {local_dt.strftime('%d/%m às %H:%M')} foi cancelado. 😔"
         return cls.send_message(appointment, 'cancellation', msg)
 
     @classmethod

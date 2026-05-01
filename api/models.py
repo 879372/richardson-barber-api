@@ -54,7 +54,7 @@ class Appointment(models.Model):
     barber = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='appointments_as_barber')
     service = models.ForeignKey(Service, on_delete=models.SET_NULL, null=True)
     date_time = models.DateTimeField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='confirmed')
     total_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     notes = models.TextField(blank=True, null=True)
 
@@ -122,6 +122,8 @@ class WorkingHour(models.Model):
     day_of_week = models.IntegerField(choices=DAY_CHOICES)
     start_time = models.TimeField()
     end_time = models.TimeField()
+    break_start_time = models.TimeField(null=True, blank=True)
+    break_end_time = models.TimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:

@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, ServiceViewSet, ProductViewSet, 
     AppointmentViewSet, PaymentViewSet, ExpenseViewSet,
-    DashboardView, WorkingHourViewSet, TimeBlockViewSet, ProductSaleViewSet
+    DashboardView, WorkingHourViewSet, TimeBlockViewSet, ProductSaleViewSet, GoalViewSet, FinancialSummaryView
 )
 
 router = DefaultRouter()
@@ -16,8 +16,10 @@ router.register(r'expenses', ExpenseViewSet)
 router.register(r'working-hours', WorkingHourViewSet)
 router.register(r'time-blocks', TimeBlockViewSet)
 router.register(r'product-sales', ProductSaleViewSet)
+router.register(r'goals', GoalViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
     path('dashboard-summary/', DashboardView.as_view(), name='dashboard-summary'),
+    path('financial-summary/', FinancialSummaryView.as_view(), name='financial-summary'),
 ]
